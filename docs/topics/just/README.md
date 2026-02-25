@@ -1,6 +1,6 @@
 # Just
 
-Command runner conventions for this repository. This document covers the architecture, file organization, and patterns for Just recipes. It does not cover Just syntax; see the [Just manual](https://just.systems/man/en/) for language reference.
+Command runner conventions. This document covers the architecture, file organization, and patterns for Just recipes. It does not cover Just syntax; see the [Just manual](https://just.systems/man/en/) for language reference.
 
 For the reasoning behind these conventions, see [spec/README.md](spec/README.md).
 
@@ -22,7 +22,7 @@ The Just configuration is organized into four layers. Each layer has a distinct 
 
 - **Root module** (`bin/just/root/`): Public recipes the developer runs directly (`just build`, `just save`, `just dev`). Imported into the top-level `Justfile` via `import`, so recipes appear without a namespace prefix.
 - **AI dispatch layer** (`bin/just/ai/`): Private recipes that route to the active AI backend. The `ai_bin` variable in `settings.just` determines which backend receives the call. Declared as a `mod` in the `Justfile`, so recipes are namespaced (`just ai save`).
-- **AI backends** (`bin/just/claude/`, `bin/just/opencode/`): Provider-specific implementations. Each backend has a `prompt` recipe that knows how to invoke its AI tool against prompt definitions in `docs/prompts/`. Declared as `mod` in the `Justfile`, so recipes are namespaced (`just claude save`, `just opencode save`).
+- **AI backends** (`bin/just/<provider>/`): Provider-specific implementations. Each backend has a `prompt` recipe that knows how to invoke its AI tool against prompt definitions in `docs/prompts/`. Declared as `mod` in the `Justfile`, so recipes are namespaced (`just <provider> <recipe>`).
 - **Settings** (`bin/just/settings.just`): Shared configuration imported by every module. Defines shell, dotenv loading, and the `ai_bin` variable.
 
 </rules>
@@ -44,7 +44,134 @@ Example flow for `just save`:
 
 1. `bin/just/root/save.just` calls `just ai save`
 2. `bin/just/ai/save.just` calls `just {{ai_bin}} save`
-3. `bin/just/claude/save.just` (or `opencode`) calls its `prompt` recipe with the appropriate prompt directory
+3. `bin/just/<provider>/save.just` calls its `prompt` recipe with the appropriate prompt directory
+
+### Syntax Reference
+
+The examples below show the concrete Just syntax for the architecture described above. Provider names and tool invocations are illustrative — the structural patterns are the standard.
+
+#### Root `Justfile`
+
+The root `Justfile` lives at the project root. It declares `mod` for each namespaced module and uses `import` for the root module so its recipes appear at the top level.
+
+```just
+mod claude "bin/just/claude/.mod.just"
+mod opencode "bin/just/opencode/.mod.just"
+mod ai "bin/just/ai/.mod.just"
+
+import "bin/just/root/.mod.just"
+
+# List available commands.
+[group('root')]
+default:
+  just -l
+```
+
+#### Module Entry Point (`.mod.just`)
+
+Every module directory has a `.mod.just` file. It imports `settings.just` first, then imports each recipe file in the directory.
+
+```just
+# bin/just/root/.mod.just
+import "../settings.just"
+import "save.just"
+import "done.just"
+import "build.just"
+```
+
+#### Delegation Chain
+
+The following shows the complete delegation chain for a `save` recipe across all four layers.
+
+**Root recipe** (`bin/just/root/save.just`) — public, delegates to the AI dispatch layer:
+
+```just
+# AI generated commit.
+[group('root')]
+save:
+  echo "Committing changes, please wait..."
+  just ai save
+  echo "Done"
+```
+
+**AI dispatch recipe** (`bin/just/ai/save.just`) — private, routes to the active backend via `{{ai_bin}}`:
+
+```just
+# Invokes AI to generate a commit.
+[private]
+[group('ai')]
+save:
+  just {{ai_bin}} save
+```
+
+**Backend recipe** (`bin/just/<provider>/save.just`) — private, calls the provider's `prompt` recipe with the prompt directory name and a context string:
+
+```just
+# Invokes AI to generate a commit.
+[private]
+[group('claude')]
+save:
+  just claude prompt save "Generate a commit, but do NOT push."
+```
+
+**Prompt recipe** (`bin/just/<provider>/prompt.just`) — private, the single integration point between Just and the AI CLI. Accepts a `directory` parameter that maps to `docs/prompts/<directory>/README.md` and an optional `context` string:
+
+```just
+# Invoke a prompt definition against the AI provider.
+[private]
+[group('claude')]
+prompt directory context="Run the prompt against the entire repo.":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  if ! command -v claude &> /dev/null; then
+    echo "Error: This command requires 'claude' to be installed."
+    exit 1
+  fi
+
+  prompt="{{context}} "
+  prompt+="@docs/prompts/{{directory}}/README.md "
+  prompt+="Do NOT add AI signatures or co-author attributions."
+
+  claude -p --verbose "$prompt"
+```
+
+Each AI provider has its own `prompt.just` with provider-specific CLI invocation. The interface (accepting `directory` and `context`) remains the same across providers.
+
+#### AI Dispatch Composition
+
+The AI dispatch layer can compose multiple operations. For example, a `done` recipe commits via the backend and then pushes:
+
+```just
+# Invokes AI to generate a commit and then pushes commit.
+[private]
+[group('ai')]
+done:
+  just {{ai_bin}} save
+  git push
+```
+
+This does not require a corresponding `done` recipe in the backend — the dispatch layer handles the composition directly.
+
+#### Non-AI Recipes
+
+Root recipes that do not involve AI invoke tools directly without going through the dispatch chain:
+
+```just
+# Build the application for production.
+[group('root')]
+build:
+  bun run build
+```
+
+```just
+# Start the development server.
+[group('root')]
+dev:
+  bun run dev
+```
+
+These still follow the same conventions: one recipe per file, a descriptive comment, and a `[group()]` annotation.
 
 ## File Organization
 
@@ -65,7 +192,7 @@ Example flow for `just save`:
 - Root recipes are public. They are the user-facing interface.
 - AI module recipes are private. Mark them with `[private]`.
 - Every recipe has a comment on the line above it describing what it does. This comment appears in `just -l` output.
-- Every recipe has a `[group()]` annotation. The group name matches the module name (`root`, `ai`, `claude`, `opencode`).
+- Every recipe has a `[group()]` annotation. The group name matches the module name.
 
 </rules>
 
@@ -73,8 +200,8 @@ Example flow for `just save`:
 
 <rules>
 
-- All recipes execute through the devbox shell (`set shell := ["devbox", "run", "-q", "--"]` in `settings.just`).
-- Environment variables load from `.env.development` via `set dotenv-filename`.
+- All recipes execute through a managed shell environment configured via `set shell` in `settings.just`.
+- Environment variables load from a dotenv file via `set dotenv-filename` in `settings.just`.
 - Recipes that need bash scripting use a `#!/usr/bin/env bash` shebang with `set -euo pipefail`.
 
 </rules>
@@ -83,7 +210,7 @@ Example flow for `just save`:
 
 <rules>
 
-- The `ai_bin` variable in `settings.just` controls which AI backend is active. Valid values: `"claude"`, `"opencode"`.
+- The `ai_bin` variable in `settings.just` controls which AI backend is active. Set it to the name of the desired backend module.
 - AI backends reference prompt definitions in `docs/prompts/`. The recipe name matches the prompt directory name (`save` invokes `docs/prompts/save/README.md`).
 - Each backend has a `prompt` recipe that accepts a directory name and optional context string. This is the single point of integration between Just and the AI tool.
 
@@ -94,7 +221,7 @@ Example flow for `just save`:
 1. Create a new directory under `bin/just/` named after the provider (e.g., `bin/just/newprovider/`).
 2. Create a `.mod.just` that imports `settings.just` and the recipe files.
 3. Create a `prompt.just` that invokes the provider's CLI with the prompt file from `docs/prompts/`.
-4. Create recipe files (`save.just`, `docs-audit.just`, etc.) that call the `prompt` recipe.
+4. Create recipe files for each AI recipe that call the `prompt` recipe.
 5. Add a `mod` declaration in the root `Justfile`.
 6. Set `ai_bin` in `settings.just` to the new provider name to make it the default.
 
@@ -108,4 +235,29 @@ Example flow for `just save`:
 
 ## Configuration Reference
 
-All runtime configuration is defined in `bin/just/settings.just`. Per [philosophy.md](../../foundation/philosophy.md), when this document and configuration conflict, configuration wins.
+All runtime configuration is defined in `bin/just/settings.just`. When this document and configuration conflict, configuration wins.
+
+### Initial `settings.just` Setup
+
+When initializing Just support in a project, create `bin/just/settings.just` with the following structure:
+
+```just
+# Suppress command echo in output.
+set quiet
+
+# Load environment variables from a dotenv file.
+set dotenv-load
+set dotenv-override
+set dotenv-filename := ".env.development"
+
+# Execute all recipes through a managed shell environment.
+# Replace the command below with the appropriate environment runner for the project
+# (e.g., devbox, nix, mise, or any tool that provides a consistent shell).
+set shell := ["devbox", "run", "-q", "--"]
+
+# Name of the active AI backend. Must match the directory name of a
+# backend module under bin/just/ (e.g., "claude", "opencode").
+ai_bin := "claude"
+```
+
+Adapt the `set shell` value to whatever environment manager the project uses. The rest of the settings should remain as shown unless there is a specific reason to diverge.
