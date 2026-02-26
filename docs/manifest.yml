@@ -2,3 +2,8 @@ name: codectx-just
 author: ""
 version: 0.0.3
 description: Documentation package for codectx-just
+topics:
+    - id: just
+      path: topics/just/README.md
+      description: Just
+      spec: topics/just/spec/README.md
